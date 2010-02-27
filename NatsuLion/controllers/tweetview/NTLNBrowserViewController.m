@@ -5,11 +5,20 @@
 #import "NTLNTwitterPost.h"
 #import "NTLNTweetPostViewController.h"
 
+typedef double progress_t;
+
+@protocol WebProgressEstimateChangedNotificationObject
+- (progress_t) estimatedProgress;
+@end
+
 @interface NTLNBrowserViewController(Private)
 - (void)setupToolbarTop;
 - (void)setupToolbarBottom;
 - (void)updatePrevNextButton;
 - (void)updateReloadButton;
+- (void)updateTitle:(NSString*) titleString;
+- (void)releaseInternalWebView;
+- (void)webViewProgressEstimateChanged:(NSNotification*)notif;
 
 - (void)reloadButtonPushed:(id)sender;
 - (void)doneButtonPushed:(id)sender;
@@ -58,7 +67,9 @@
 
 - (void)dealloc {
 	LOG(@"NTLNBrowserViewController#dealloc");
-	
+	[[NSNotificationCenter defaultCenter] removeObserver: self];
+
+	[self releaseInternalWebView];
 	[url release];
 	[toobarTop release];
 	[toobarBottom release];
@@ -75,31 +86,65 @@
 }
 
 #pragma mark UIWebView delegate methods
+- (void)releaseInternalWebView
+{
+	if (internalWebView) {
+		[internalWebView release];
+		internalWebView = nil;
+	}
+}
 
 - (void)webViewDidStartLoad:(UIWebView *)aWebView {
+	
+	if (!internalWebView) {
+		if ([aWebView respondsToSelector: @selector(_documentView)]) {
+			UIWebDocumentView *dv = [aWebView _documentView];
+			if ([dv respondsToSelector: @selector(webView)]) {
+				internalWebView = [dv webView];
+				[internalWebView retain];
+				[[NSNotificationCenter defaultCenter] 
+				 addObserver: self selector: @selector(webViewProgressEstimateChanged:) name: @"WebProgressEstimateChangedNotification" object: internalWebView];
+			}
+		}
+	}
+	
 	loading = YES;
+	[titleView showProgress];
 	[self updateReloadButton];
 	[self updatePrevNextButton];
 }
 
+- (void)webViewProgressEstimateChanged:(NSNotification*)notif {
+	if (titleView) {
+		id<WebProgressEstimateChangedNotificationObject> nobj;
+		nobj = [notif object];
+		titleView.progress.progress = [nobj estimatedProgress];
+	}
+}
+
 - (void)webViewDidFinishLoad:(UIWebView *)aWebView {
 	loading = NO;
-	title.title = [webView stringByEvaluatingJavaScriptFromString:@"document.title"];
+	[self updateTitle: [webView stringByEvaluatingJavaScriptFromString:@"document.title"]];
 	[self updateReloadButton];
 	[self updatePrevNextButton];
+
+	[titleView hideProgress];
 }
 
 - (void)webView:(UIWebView *)aWebView didFailLoadWithError:(NSError *)error {
 	if (error.code != -999) {
 		[[NTLNAlert instance] alert:@"Browser error" withMessage:error.localizedDescription];
 	}
+	
+	[titleView hideProgress];
 }
 
 - (BOOL)webView:(UIWebView *)aWebView shouldStartLoadWithRequest:(NSURLRequest *)request 
  navigationType:(UIWebViewNavigationType)navigationType {
 	NSString *scheme = request.mainDocumentURL.scheme;
+
 	if ([scheme isEqualToString:@"http"] || [scheme isEqualToString:@"https"]) {
-		title.title = request.mainDocumentURL.description;
+		[self updateTitle: request.mainDocumentURL.description];
 		return YES;
 	} else {
 		[[UIApplication sharedApplication] openURL:request.URL];
@@ -108,6 +153,12 @@
 }
 
 #pragma mark Private
+
+- (void)updateTitle:(NSString*) titleString {
+	if (titleView) {
+		titleView.label.text = titleString;
+	}
+}
 
 - (void)setupToolbarTop {
 	UIBarButtonItem *doneButton = [[[UIBarButtonItem alloc] initWithTitle:@"close" 
@@ -122,6 +173,10 @@
 											target:nil 
 											action:nil];
 	title.width = 220;
+	
+	titleView = [[[NTLNBrowserTitleView alloc] initWithFrame: CGRectMake(0, 0, title.width, toobarTop.frame.size.height)]
+					autorelease];
+	title.customView = titleView;
 	
 	UIBarButtonItem *spacer = [[[UIBarButtonItem alloc] initWithBarButtonSystemItem:UIBarButtonSystemItemFlexibleSpace 
 																			 target:nil action:nil] autorelease];
